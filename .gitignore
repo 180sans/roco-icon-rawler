@@ -1,0 +1,41 @@
+# Downloaded images and legacy output
+/skill/
+/skill_type/
+/element/
+/pet/
+/output/
+
+# Partial downloads and local inspection files
+*.part
+*.tmp
+/inspect_*.html
+*.log
+
+# Python cache, test output and packaging
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
+/build/
+/dist/
+
+# Local Python environments and configuration
+.venv/
+.venv-build/
+venv/
+env/
+.env
+.env.*
+!.env.example
+
+# IDE and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
