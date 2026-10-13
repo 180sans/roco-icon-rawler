@@ -4,10 +4,9 @@
 
 界面会显示当前图鉴的完整网址，点击即可打开来源页面；切换到精灵头像时自动显示精灵图鉴地址。图片文件来自 `patchwiki.biligame.com`（BWIKI 图片服务）。
 
-1. 解压整个压缩包至自己的文件夹，双击 NRCImageCrawler.exe。
-2. 选择图片种类和筛选条件，核对匹配预览后点击“开始下载”。
-3. 默认在 exe 所在文件夹下生成 skill（技能图像）、skill_type（技能类型图像）、element（属性图像）、pet（精灵图像） 四类图片目录。
-   可在界面选择其他可写的输出根目录。
+## 简单使用
+1. 双击 NRCImageCrawler.exe。
+2. 一共有四个类别的图像skill（技能图标）、skill_type（技能分类图标）、element（系别图标）、pet（精灵头像）， 默认在 exe 所在文件夹下生成对应文件目录。选择类别后，点击全量下载，然后点击“开始下载”。
 
 来源：
 技能图鉴：https://wiki.biligame.com/nrc/技能图鉴
