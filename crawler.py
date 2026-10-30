@@ -286,16 +286,88 @@ def fetch_catalog(session) -> Catalog:
     return parse_catalog(fetch_bytes(session, CATALOG_URL).decode("utf-8-sig"))
 
 
-def fetch_dataset(session, dataset: str) -> Catalog:
+def fetch_dataset(session, dataset: str, *, skill_catalog=None) -> Catalog:
     if dataset == "pet":
         return parse_pet_catalog(fetch_bytes(session, PET_CATALOG_URL).decode("utf-8-sig"))
-    catalog = fetch_catalog(session)
+    catalog = skill_catalog if skill_catalog is not None else fetch_catalog(session)
     if dataset == "skill":
         return catalog
     icons = catalog.icons[dataset]
     if not icons or len(icons) != len(catalog.options["category" if dataset == "skill_type" else "element"]):
         raise ValueError("选项图标缺失，网站结构可能已改变。")
     return Catalog(icons, {"name": [icon.name for icon in icons]})
+
+
+def crawl_images(session, output: Path, *, dataset="all", filters=None, keyword="",
+                 all_items=False, missing_only=True, delay=0.4, log=print, stop=None,
+                 on_catalog=None, preview=False):
+    """Refresh website inventories each run, then reconcile only the requested scope."""
+    if dataset != "all" and dataset not in DATASET_LABELS:
+        raise ValueError(f"未知图片种类：{dataset}")
+    if dataset == "all" and (any((filters or {}).values()) or keyword.strip()):
+        raise ValueError("总爬取不使用子类筛选；请先选择一个图片种类。")
+    datasets = list(DATASET_LABELS) if dataset == "all" else [dataset]
+    result = dict(matched=0, saved=0, skipped=0, failed=0, category_errors=0,
+                  stopped=False, datasets={})
+    skill_catalog = None
+    skill_error = None
+    mode = "缺失爬取（只补缺少或损坏的图片）" if missing_only else "全量爬取（重新下载已有图片）"
+    log(f"模式：{mode}；范围：{'全部四类' if dataset == 'all' else DATASET_LABELS[dataset]}")
+    for current in datasets:
+        if stop and stop.is_set():
+            break
+        log(f"\n正在读取最新网页清单：{DATASET_LABELS[current]}")
+        log(f"来源：{unquote(PET_CATALOG_URL if current == 'pet' else CATALOG_URL)}")
+        try:
+            if current == "pet":
+                catalog = fetch_dataset(session, current)
+            else:
+                if skill_catalog is None:
+                    if skill_error is not None:
+                        raise ValueError(str(skill_error))
+                    try:
+                        skill_catalog = fetch_catalog(session)
+                    except (requests.RequestException, ValueError, OSError) as error:
+                        skill_error = error
+                        raise
+                catalog = fetch_dataset(session, current, skill_catalog=skill_catalog)
+            if on_catalog:
+                on_catalog(current, catalog)
+            items = catalog.skills if dataset == "all" else select_items(
+                catalog, filters or {}, keyword=keyword, all_items=all_items)
+            folder = output / current
+            paths = output_paths(items, folder)
+            pending = []
+            existing = 0
+            for item, path in zip(items, paths):
+                if stop and stop.is_set():
+                    break
+                if missing_only and valid_png(path):
+                    existing += 1
+                else:
+                    pending.append(item)
+            if stop and stop.is_set():
+                break
+            log(f"{current}：网页匹配 {len(items)} 张，已有可用 {existing} 张，本次下载 {len(pending)} 张。")
+            counts = (dict(saved=0, skipped=0, failed=0) if preview else
+                      download_icons(pending, folder, session, overwrite=not missing_only,
+                                     delay=delay, log=log, stop=stop))
+            if preview:
+                for item in pending:
+                    log(f"  待下载：{current}/{filename_for(item.name)}")
+            counts['skipped'] += existing
+            result['datasets'][current] = dict(matched=len(items), **counts)
+            result['matched'] += len(items)
+            for key in ("saved", "skipped", "failed"):
+                result[key] += counts[key]
+        except (requests.RequestException, ValueError, OSError) as error:
+            result['category_errors'] += 1
+            result['datasets'][current] = {'error': str(error)}
+            log(f"{current} 类别失败：{error}；其他类别仍会继续。")
+    result['stopped'] = bool(stop and stop.is_set())
+    log(f"\n{'预览结束（未写入文件）' if preview else '已停止' if result['stopped'] else '任务结束'}：下载 {result['saved']}，已有跳过 {result['skipped']}，"
+        f"图片失败 {result['failed']}，类别失败 {result['category_errors']}。")
+    return result
 
 
 def download_icons(skills, output: Path, session, *, overwrite=False,
@@ -338,7 +410,8 @@ def download_icons(skills, output: Path, session, *, overwrite=False,
 def main() -> int:
     parser = argparse.ArgumentParser(description="下载技能、技能分类、系别图标和精灵紧凑头像")
     parser.add_argument("--gui", action="store_true", help="打开勾选界面")
-    parser.add_argument("--dataset", choices=list(DATASET_LABELS), default="skill", help="图片种类")
+    parser.add_argument("--dataset", choices=["all", *DATASET_LABELS], default=None,
+                        help="默认总爬取四类；提供技能筛选时默认 skill")
     for key in FILTER_FIELDS:
         parser.add_argument(f"--{key}", action="append", default=[], help=f"{FILTER_LABELS[key]}；可重复指定")
     parser.add_argument("--name", action="append", default=[], help="分类或系别图标名称，可重复指定")
@@ -346,12 +419,15 @@ def main() -> int:
     parser.add_argument("--stage", action="append", default=[], choices=["1", "2", "3"])
     parser.add_argument("--number", action="append", default=[], help="精灵编号，可重复指定")
     parser.add_argument("--keyword", default="", help="名称包含的文字")
-    parser.add_argument("--all", dest="all_skills", action="store_true", help="明确下载全量")
+    parser.add_argument("--all", dest="all_skills", action="store_true", help="当前类别全部（不筛选子类）")
     parser.add_argument("--list-filters", action="store_true", help="仅查看当前图片种类的可用筛选条件")
     parser.add_argument("--preview", action="store_true", help="仅列出匹配文件名，不下载图片")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT,
                         help="输出根目录，在其下创建 skill/skill_type/element/pet")
-    parser.add_argument("--overwrite", action="store_true", help="重新下载已有图片")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--mode", choices=["missing", "full"], default="missing",
+                      help="missing：仅补缺失（默认）；full：重新下载所有匹配图片")
+    mode.add_argument("--overwrite", action="store_true", help="兼容旧参数，等同 --mode full")
     parser.add_argument("--delay", type=float, default=0.4, help="图片请求间隔秒数")
     args = parser.parse_args()
     if args.gui:
@@ -360,8 +436,12 @@ def main() -> int:
         return 0
     if args.delay < 0:
         parser.error("--delay 不能小于 0")
+    has_skill_filters = any(getattr(args, key) for key in FILTER_FIELDS) or args.keyword.strip()
+    if args.dataset is None:
+        args.dataset = "skill" if has_skill_filters else "all"
     allowed = (set(FILTER_FIELDS) if args.dataset == "skill" else
-               set(PET_GROUPS) | {"number"} if args.dataset == "pet" else {"name"})
+               set(PET_GROUPS) | {"number"} if args.dataset == "pet" else
+               set() if args.dataset == "all" else {"name"})
     filters = {key: getattr(args, key) for key in FILTER_FIELDS}
     filters.update(name=args.name, form_kind=args.pet_form, stage=args.stage,
                    number=[number.zfill(3) for number in args.number])
@@ -369,26 +449,25 @@ def main() -> int:
     if unsupported:
         parser.error(f"{args.dataset} 不支持这些筛选：{'、'.join(unsupported)}")
     filters = {key: values for key, values in filters.items() if key in allowed}
-    if not args.list_filters and not args.all_skills and not (any(filters.values()) or args.keyword.strip()):
-        parser.error("请选择 --season S4 等筛选条件；也可以用 --gui 打开勾选界面")
+    if args.dataset == "all" and args.keyword.strip():
+        parser.error("总爬取不使用关键词；请先指定 --dataset")
+    include_all = args.all_skills or not (any(filters.values()) or args.keyword.strip())
     try:
         with new_session() as session:
             print(f"下载来源（BWIKI）：{unquote(PET_CATALOG_URL if args.dataset == 'pet' else CATALOG_URL)}")
             print("图片文件来源：patchwiki.biligame.com")
-            catalog = fetch_dataset(session, args.dataset)
             if args.list_filters:
-                for key, values in catalog.options.items():
-                    print(f"{FILTER_LABELS[key]}：{'、'.join(values)}")
+                for dataset in (DATASET_LABELS if args.dataset == "all" else [args.dataset]):
+                    catalog = fetch_dataset(session, dataset)
+                    print(DATASET_LABELS[dataset])
+                    for key, values in catalog.options.items():
+                        print(f"{FILTER_LABELS[key]}：{'、'.join(values)}")
                 return 0
-            selected = select_items(catalog, filters, keyword=args.keyword, all_items=args.all_skills)
-            print(f"{DATASET_LABELS[args.dataset]}：匹配 {len(selected)} / {len(catalog.skills)} 张图片：")
-            for item in selected:
-                print(f"  {item.name}.png")
-            if args.preview or not selected:
-                return 0
-            counts = download_icons(selected, args.output.resolve() / args.dataset, session,
-                                    overwrite=args.overwrite, delay=args.delay)
-            return 1 if counts["failed"] else 0
+            counts = crawl_images(session, args.output.resolve(), dataset=args.dataset,
+                                  filters=filters, keyword=args.keyword, all_items=include_all,
+                                  missing_only=not (args.overwrite or args.mode == "full"),
+                                  delay=args.delay, preview=args.preview)
+            return 1 if counts["failed"] or counts["category_errors"] else 0
     except (requests.RequestException, ValueError, OSError) as error:
         print(f"错误：{error}")
         return 1

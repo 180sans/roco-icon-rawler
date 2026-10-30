@@ -8,7 +8,6 @@ def main():
         from io import BytesIO
         from pathlib import Path
         import tkinter as tk
-        from unittest.mock import patch
         import ssl
         import requests
         from bs4 import BeautifulSoup
@@ -25,11 +24,13 @@ def main():
         ssl.create_default_context(cafile=requests.certs.where())
         root = tk.Tk()
         root.withdraw()
-        with patch.object(App, "load"):
-            app = App(root, DEFAULT_OUTPUT)
+        app = App(root, DEFAULT_OUTPUT)
         root.update_idletasks()
         assert app.output.get() == str(DEFAULT_OUTPUT)
         assert app.page_scrollbar.winfo_exists()
+        assert app.dataset == "all"
+        assert app.missing_only.get()
+        assert str(app.total_button['state']) == 'normal'
         root.destroy()
         if getattr(sys, "frozen", False):
             assert DEFAULT_OUTPUT == Path(sys.executable).resolve().parent

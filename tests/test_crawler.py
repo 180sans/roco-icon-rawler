@@ -3,12 +3,13 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from crawler import (Catalog, Icon, Pet, Selection, Skill, download_icons, filename_for,
-                     original_image_url, output_paths, parse_catalog, parse_pet_catalog,
+                     crawl_images, original_image_url, output_paths, parse_catalog, parse_pet_catalog,
                      select_items, select_skills, valid_png)
 
 
@@ -32,6 +33,12 @@ class FakeSession:
     def get(self, url, **kwargs):
         self.calls.append(url)
         return FakeResponse(self.content)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        pass
 
 
 class CrawlerTests(unittest.TestCase):
@@ -152,6 +159,87 @@ class CrawlerTests(unittest.TestCase):
             parse_pet_catalog(html + html)
         no_form = Pet("001", "迪莫", "", "https://example.com/dimo.png", ("none",), ("光",), ("main",), "1")
         self.assertEqual(filename_for(no_form.name), "001迪莫.png")
+
+    def test_total_missing_only_discovers_new_files_across_all_collections(self):
+        records = {
+            "skill": [sample(), sample("新技能")],
+            "skill_type": [Icon("物攻", "https://example.com/icon.png")],
+            "element": [Icon("火", "https://example.com/icon.png")],
+            "pet": [Pet("007", "烈火战神", "首领形态", "https://example.com/icon.png",
+                        ("none",), ("火",), ("lord",), "")],
+        }
+        html = BytesIO()
+        Image.new("RGBA", (2, 2), (255, 0, 0, 255)).save(html, format="PNG")
+        session = FakeSession(html.getvalue())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "skill").mkdir()
+            (root / "skill" / "星火.png").write_bytes(html.getvalue())
+            with patch("crawler.fetch_catalog", return_value=Catalog([], {})), \
+                    patch("crawler.fetch_dataset", side_effect=lambda _session, dataset, **_kwargs:
+                          Catalog(records[dataset], {})):
+                result = crawl_images(session, root, dataset="all", missing_only=True,
+                                      delay=0, log=lambda _: None)
+            self.assertEqual(result["matched"], 5)
+            self.assertEqual(result["saved"], 4)
+            self.assertEqual(result["skipped"], 1)
+            self.assertEqual(result["failed"], 0)
+            self.assertTrue((root / "skill" / "新技能.png").is_file())
+            self.assertTrue((root / "skill_type" / "物攻.png").is_file())
+            self.assertTrue((root / "element" / "火.png").is_file())
+            self.assertTrue((root / "pet" / "007烈火战神.png").is_file())
+
+    def test_total_forced_refreshes_existing_icons(self):
+        image = BytesIO()
+        Image.new("RGBA", (2, 2), (255, 0, 0, 255)).save(image, format="PNG")
+        session = FakeSession(image.getvalue())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            folder = root / "skill_type"
+            folder.mkdir()
+            existing = folder / "物攻.png"
+            existing.write_bytes(image.getvalue())
+            with patch("crawler.fetch_catalog", return_value=Catalog([], {})), \
+                    patch("crawler.fetch_dataset", return_value=Catalog(
+                        [Icon("物攻", "https://example.com/icon.png")], {})):
+                result = crawl_images(session, root, dataset="skill_type", all_items=True,
+                                      missing_only=False, delay=0, log=lambda _: None)
+            self.assertEqual((result["saved"], result["skipped"]), (1, 0))
+            self.assertEqual(len(session.calls), 1)
+
+    def test_subcategory_missing_only_respects_filters(self):
+        records = [sample(), sample("其他", category="物攻", tags=("强化",))]
+        image = BytesIO()
+        Image.new("RGBA", (2, 2), (255, 0, 0, 255)).save(image, format="PNG")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch("crawler.fetch_catalog", return_value=Catalog([], {})), \
+                    patch("crawler.fetch_dataset", return_value=Catalog(
+                        records, {"season": ["S4"], "element": ["火"], "category": ["状态", "物攻"],
+                                  "tag": ["异常", "强化"], "recent": ["无"]})):
+                result = crawl_images(FakeSession(image.getvalue()), root, dataset="skill",
+                                      filters={"season": ["S4"], "category": ["状态"]},
+                                      missing_only=True, delay=0, log=lambda _: None)
+            self.assertEqual(result["matched"], 1)
+            self.assertTrue((root / "skill" / "星火.png").is_file())
+            self.assertFalse((root / "skill" / "其他.png").exists())
+
+    def test_all_categories_continue_when_one_catalog_fails(self):
+        image = BytesIO()
+        Image.new("RGBA", (2, 2), (255, 0, 0, 255)).save(image, format="PNG")
+        session = FakeSession(image.getvalue())
+        def fetch(_session, dataset, **_kwargs):
+            if dataset == "pet":
+                raise ValueError("模拟精灵图鉴错误")
+            return Catalog([Icon(dataset, "https://example.com/icon.png")], {})
+        with tempfile.TemporaryDirectory() as directory, \
+                patch("crawler.fetch_catalog", return_value=Catalog([], {})), \
+                patch("crawler.fetch_dataset", side_effect=fetch):
+            result = crawl_images(session, Path(directory), dataset="all", missing_only=True,
+                                  delay=0, log=lambda _: None)
+            self.assertEqual(result["category_errors"], 1)
+            self.assertEqual(result["saved"], 3)
+            self.assertTrue(result["datasets"]["pet"]["error"].startswith("模拟"))
 
 
 if __name__ == "__main__":

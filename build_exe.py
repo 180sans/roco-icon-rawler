@@ -1,5 +1,6 @@
 """Build and verify a standalone Windows executable in an isolated environment."""
 from pathlib import Path
+import argparse
 import os
 import subprocess
 import sys
@@ -16,6 +17,10 @@ def run(*args):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="打包独立 Windows exe 并验证")
+    parser.add_argument("--skip-install", action="store_true",
+                        help="复用已安装的打包依赖，无需联网（首次打包不要使用）")
+    args = parser.parse_args()
     if sys.platform != "win32":
         raise SystemExit("请在 Windows 上打包 Windows .exe。")
     environment = ROOT / ".venv-build"
@@ -23,7 +28,9 @@ def main():
     if not python.is_file():
         print("创建隔离的打包环境…", flush=True)
         venv.EnvBuilder(with_pip=True).create(environment)
-    run(python, "-m", "pip", "install", "-r", ROOT / "requirements-build.txt")
+    if not args.skip_install:
+        run(python, "-m", "pip", "install", "-r", ROOT / "requirements-build.txt")
+    os.environ["PYINSTALLER_CONFIG_DIR"] = str(ROOT / "build" / "pyinstaller-cache")
     run(python, "-m", "unittest", "discover", "-s", "tests", "-v")
     run(python, "-m", "PyInstaller", "--noconfirm", "--clean", "--onefile",
         "--windowed", "--name", APP_NAME, "--distpath", ROOT / "dist",

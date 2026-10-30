@@ -8,7 +8,9 @@ from urllib.parse import unquote
 import webbrowser
 
 from crawler import (CATALOG_URL, PET_CATALOG_URL, DEFAULT_OUTPUT, DATASET_LABELS, FILTER_LABELS, OPTION_LABELS,
-                     download_icons, fetch_dataset, item_values, new_session, select_items)
+                     crawl_images, fetch_dataset, item_values, new_session, select_items)
+
+SCOPE_LABELS = {"all": "总爬取（全部四类图像）", **DATASET_LABELS}
 
 
 class App:
@@ -21,13 +23,13 @@ class App:
         self.events = queue.Queue()
         self.stop = threading.Event()
         self.checks = {}
-        self.dataset = "skill"
-        self.dataset_label = tk.StringVar(value=DATASET_LABELS[self.dataset])
+        self.dataset = "all"
+        self.dataset_label = tk.StringVar(value=SCOPE_LABELS[self.dataset])
         self.source_url = tk.StringVar()
         self.output = tk.StringVar(value=str(output))
         self.keyword = tk.StringVar()
-        self.all_items = tk.BooleanVar()
-        self.overwrite = tk.BooleanVar()
+        self.all_items = tk.BooleanVar(value=True)
+        self.missing_only = tk.BooleanVar(value=True)
         self.status = tk.StringVar()
         root.title("洛克王国世界 · 图像爬取")
         root.geometry("1050x820")
@@ -47,7 +49,7 @@ class App:
         root.bind("<MouseWheel>", self.scroll_page, add="+")
         ttk.Label(wrapper, text="技能 / 技能分类 / 系别 / 精灵头像",
                   font=("Microsoft YaHei", 14)).pack(anchor="w")
-        ttk.Label(wrapper, text="图片分目录保存；同组多选取并集，不同组取交集。"
+        ttk.Label(wrapper, text="日常使用：直接点击“总爬取”；默认只补缺失。需要刷新已有图片时取消“缺失爬取”。"
                   ).pack(anchor="w", pady=(4, 10))
         self.controls = ttk.Frame(wrapper)
         self.controls.pack(fill="x")
@@ -55,7 +57,7 @@ class App:
         row.pack(fill="x", pady=4)
         ttk.Label(row, text="图片种类：").pack(side="left")
         self.dataset_box = ttk.Combobox(row, textvariable=self.dataset_label,
-                                       values=list(DATASET_LABELS.values()), width=26, state="readonly")
+                                       values=list(SCOPE_LABELS.values()), width=26, state="readonly")
         self.dataset_box.pack(side="left")
         self.dataset_box.bind("<<ComboboxSelected>>", self.switch_dataset)
         self.reload_button = ttk.Button(row, text="刷新网站数据", command=self.reload)
@@ -66,7 +68,12 @@ class App:
         self.source_link = ttk.Label(source_row, textvariable=self.source_url,
                                      foreground="#0969da", cursor="hand2")
         self.source_link.pack(side="left")
-        self.source_link.bind("<Button-1>", lambda _event: webbrowser.open(self.source_url.get()))
+        self.source_link.bind("<Button-1>", lambda _event: webbrowser.open(
+            PET_CATALOG_URL if self.dataset == "pet" else CATALOG_URL))
+        self.pet_source_link = ttk.Label(self.controls, text=f"精灵图鉴：{unquote(PET_CATALOG_URL)}",
+                                         foreground="#0969da", cursor="hand2")
+        self.pet_source_link.pack(anchor="w")
+        self.pet_source_link.bind("<Button-1>", lambda _event: webbrowser.open(PET_CATALOG_URL))
         ttk.Label(self.controls, text="图片文件来源：patchwiki.biligame.com（BWIKI 图片服务）"
                   ).pack(anchor="w")
         self.hint = ttk.Label(self.controls)
@@ -76,11 +83,12 @@ class App:
         row = ttk.Frame(self.controls)
         row.pack(fill="x", pady=8)
         ttk.Label(row, text="名称或编号包含：").pack(side="left")
-        ttk.Entry(row, textvariable=self.keyword, width=24).pack(side="left")
-        ttk.Checkbutton(row, text="全量爬取", variable=self.all_items,
-                        command=self.toggle_all).pack(side="left", padx=18)
-        ttk.Checkbutton(row, text="重新下载已有图片", variable=self.overwrite).pack(side="left")
-        self.keyword.trace_add("write", lambda *_: self.preview())
+        self.keyword_entry = ttk.Entry(row, textvariable=self.keyword, width=24)
+        self.keyword_entry.pack(side="left")
+        self.scope_all_check = ttk.Checkbutton(row, text="当前类别全部（不筛选子类）", variable=self.all_items,
+                                               command=self.toggle_all)
+        self.scope_all_check.pack(side="left", padx=18)
+        self.keyword.trace_add("write", self.keyword_changed)
         row = ttk.Frame(self.controls)
         row.pack(fill="x", pady=4)
         ttk.Label(row, text="输出根目录：").pack(side="left")
@@ -89,10 +97,22 @@ class App:
         self.destination = ttk.Label(self.controls)
         self.destination.pack(anchor="w", pady=4)
         self.output.trace_add("write", lambda *_: self.update_destination())
+        self.actions = ttk.Frame(self.controls)
+        self.actions.pack(fill="x", pady=8)
+        self.total_button = ttk.Button(self.actions, text="总爬取（全部四类）",
+                                       command=lambda: self.start("all"), state="disabled")
+        self.total_button.pack(side="left")
+        self.missing_button = ttk.Button(self.actions, text="开始爬取当前范围",
+                                         command=lambda: self.start("current"), state="disabled")
+        self.missing_button.pack(side="left", padx=(8, 14))
+        self.start_button = self.missing_button  # Keep the app smoke-test entry point stable.
+        ttk.Checkbutton(self.actions, text="缺失爬取（默认开启，仅补缺少/损坏）",
+                        variable=self.missing_only, command=self.update_mode_hint).pack(side="left")
+        self.mode_hint = ttk.Label(self.controls)
+        self.mode_hint.pack(anchor="w", pady=(0, 4))
+        self.update_mode_hint()
         row = ttk.Frame(wrapper)
-        row.pack(fill="x", pady=8)
-        self.start_button = ttk.Button(row, text="开始下载", command=self.start, state="disabled")
-        self.start_button.pack(side="left")
+        row.pack(fill="x", pady=4)
         self.stop_button = ttk.Button(row, text="停止", command=self.stop.set, state="disabled")
         self.stop_button.pack(side="left", padx=8)
         ttk.Label(row, textvariable=self.status).pack(side="left", padx=8)
@@ -134,11 +154,15 @@ class App:
                 visit(child)
         visit(self.controls)
         self.dataset_box.configure(state="disabled" if locked else "readonly")
+        self.total_button.configure(state="disabled" if locked or self.loading else "normal")
+        if not locked and self.dataset == "all":
+            self.scope_all_check.configure(state="disabled")
+            self.keyword_entry.configure(state="disabled")
 
     def switch_dataset(self, _event=None):
         if self.busy or self.loading:
             return
-        self.dataset = next(key for key, value in DATASET_LABELS.items()
+        self.dataset = next(key for key, value in SCOPE_LABELS.items()
                             if value == self.dataset_label.get())
         self.load()
 
@@ -150,13 +174,22 @@ class App:
         self.catalog = None
         self.source_url.set(unquote(PET_CATALOG_URL if self.dataset == "pet" else CATALOG_URL))
         self.keyword.set("")
-        self.all_items.set(False)
+        self.all_items.set(True)
         for child in self.filters.winfo_children():
             child.destroy()
         self.checks = {}
         self.update_destination()
+        self.total_button.configure(state="disabled" if self.loading else "normal")
+        self.missing_button.configure(state="disabled")
         self.page_canvas.yview_moveto(0)
         self.root.after_idle(self.update_page_layout)
+        if self.dataset == "all":
+            self.loading = False
+            self.lock_controls(False)
+            self.hint.configure(text="一次处理 skill、skill_type、element、pet；每次开始均重新读取网页清单。")
+            self.scope_all_check.configure(state="disabled")
+            self.preview()
+            return
         if self.dataset in self.cache:
             self.accept_catalog(self.cache[self.dataset])
             return
@@ -178,7 +211,8 @@ class App:
         self.cache[self.dataset] = catalog
         self.loading = False
         self.lock_controls(False)
-        hints = {"skill": "保存为 技能名.png；默认只勾选 S4。",
+        self.total_button.configure(state="normal")
+        hints = {"skill": "保存为 技能名.png；默认全部技能，也可勾选 S4 等子类。",
                  "skill_type": "物攻、魔攻、防御、状态；保存为 选项名.png。",
                  "element": "普通、草、火、水等系别；保存为 选项名.png。",
                  "pet": "下载紧凑模式头像；保存为 编号名称（形态）.png，省略空形态和首领形态后缀。"}
@@ -188,14 +222,17 @@ class App:
         self.root.after_idle(self.update_page_layout)
 
     def show_filters(self):
+        previous = {key: {value: var.get() for value, var in values.items()}
+                    for key, values in self.checks.items()}
+        for child in self.filters.winfo_children():
+            child.destroy()
+        self.checks = {}
         for key, values in self.catalog.options.items():
             frame = ttk.LabelFrame(self.filters, text=FILTER_LABELS[key], padding=5)
             frame.pack(fill="x", pady=2)
             self.checks[key] = {}
             for index, value in enumerate(values):
-                default = (self.dataset == "skill" and key == "season" and value == "S4"
-                           or self.dataset in ("skill_type", "element"))
-                variable = tk.BooleanVar(value=default)
+                variable = tk.BooleanVar(value=previous.get(key, {}).get(value, False))
                 self.checks[key][value] = variable
                 count = sum(value in item_values(item, key) for item in self.catalog.skills)
                 label = value if key == "name" else OPTION_LABELS.get(value, value)
@@ -214,6 +251,11 @@ class App:
         self.all_items.set(False)
         self.preview()
 
+    def keyword_changed(self, *_args):
+        if self.keyword.get().strip():
+            self.all_items.set(False)
+        self.preview()
+
     def toggle_all(self):
         if self.all_items.get():
             for values in self.checks.values():
@@ -222,7 +264,22 @@ class App:
             self.keyword.set("")
         self.preview()
 
+    def update_mode_hint(self):
+        text = ("缺失模式：已有有效 PNG 自动跳过；只下载新增或损坏的文件，适用于总爬取及所有子类。"
+                if self.missing_only.get() else
+                "全量模式：当前范围内所有图片都会重新下载并覆盖，可用于更新已有图标。")
+        self.mode_hint.configure(text=text)
+
     def preview(self):
+        if self.dataset == "all" and not self.busy:
+            self.status.set("就绪：全部四类图像")
+            self.missing_button.configure(state="normal")
+            self.set_log("当前范围：总爬取（全部四类）\n\n"
+                         "skill / 技能图标\nskill_type / 技能分类图标\n"
+                         "element / 系别图标\npet / 精灵紧凑头像\n\n"
+                         "点击“总爬取”即可开始。程序会重新读取网页，并对比输出目录。\n"
+                         "默认仅补缺失；若想更新所有已有图标，取消勾选“缺失爬取”。")
+            return
         if not self.catalog or self.busy:
             return
         try:
@@ -233,12 +290,15 @@ class App:
             self.set_log(str(error))
             return
         self.status.set(f"匹配 {len(selected)} / {len(self.catalog.skills)} 张图片")
-        self.start_button.configure(state="normal" if selected else "disabled")
+        self.missing_button.configure(state="normal" if selected else "disabled")
         self.set_log("\n".join(f"{item.name}.png" for item in selected)
                      or "没有匹配的图片，请调整筛选条件。")
 
     def update_destination(self):
-        self.destination.configure(text=f"实际保存目录：{Path(self.output.get()) / self.dataset}")
+        folder = Path(self.output.get())
+        text = (f"实际保存目录：{folder} 下的 skill / skill_type / element / pet"
+                if self.dataset == "all" else f"实际保存目录：{folder / self.dataset}")
+        self.destination.configure(text=text)
 
     def choose_output(self):
         chosen = filedialog.askdirectory(parent=self.root, title="选择输出根目录")
@@ -253,32 +313,50 @@ class App:
         self.log.see("end")
         self.log.configure(state="disabled")
 
-    def start(self):
+    def start(self, scope="current"):
+        if self.busy or self.loading:
+            return
+        scope = "all" if scope == "all" or self.dataset == "all" else "current"
         try:
-            selected = self.selected()
-            if not selected:
-                raise ValueError("没有匹配的图片。")
             if not self.output.get().strip():
                 raise ValueError("请选择输出根目录。")
-            output = Path(self.output.get()).expanduser().resolve() / self.dataset
+            if scope == "current":
+                selected = self.selected()
+                if not selected:
+                    raise ValueError("没有匹配的图片。")
+                filters = {key: [value for value, var in values.items() if var.get()]
+                           for key, values in self.checks.items()}
+                dataset = self.dataset
+                keyword = self.keyword.get()
+            else:
+                filters = {}
+                dataset = "all"
+                keyword = ""
+            output = Path(self.output.get()).expanduser().resolve()
         except (ValueError, OSError) as error:
             messagebox.showerror("无法开始", str(error), parent=self.root)
             return
         self.busy = True
         self.stop.clear()
         self.lock_controls(True)
-        self.start_button.configure(state="disabled")
+        self.total_button.configure(state="disabled")
+        self.missing_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
-        self.status.set(f"正在下载 {len(selected)} 张图片…")
+        missing_only = self.missing_only.get()
+        include_all = scope == "all" or self.all_items.get()
+        scope_label = "全部四类" if scope == "all" else f"{DATASET_LABELS[dataset]}当前筛选"
+        mode_label = "缺失爬取" if missing_only else "全量更新"
+        self.status.set(f"{mode_label}：正在处理{scope_label}…")
         self.progress.start(10)
-        self.set_log(f"本次下载 {len(selected)} 张图片，输出目录：{output}")
-        overwrite = self.overwrite.get()
+        self.set_log(f"{mode_label}：{scope_label}；图片会写入 {output}")
         def worker():
             try:
                 with new_session() as session:
-                    result = download_icons(selected, output, session, overwrite=overwrite,
-                                            stop=self.stop,
-                                            log=lambda text: self.events.put(("log", text)))
+                    result = crawl_images(
+                        session, output, dataset=dataset, filters=filters, keyword=keyword,
+                        all_items=include_all, missing_only=missing_only,
+                        stop=self.stop, log=lambda text: self.events.put(("log", text)),
+                        on_catalog=lambda key, catalog: self.events.put(("fresh_catalog", (key, catalog))))
                 self.events.put(("done", result))
             except Exception as error:
                 self.events.put(("error", str(error)))
@@ -290,11 +368,17 @@ class App:
                 kind, value = self.events.get_nowait()
                 if kind == "catalog":
                     self.accept_catalog(value)
+                elif kind == "fresh_catalog":
+                    key, catalog = value
+                    self.cache[key] = catalog
+                    if key == self.dataset:
+                        self.catalog = catalog
                 elif kind == "log":
                     self.set_log(value, append=True)
                 elif kind == "load_error":
                     self.loading = False
                     self.lock_controls(False)
+                    self.missing_button.configure(state="disabled")
                     self.status.set("加载失败，可点击刷新重试。")
                     self.set_log(value)
                 elif kind in ("done", "error"):
@@ -302,10 +386,19 @@ class App:
                     self.progress.stop()
                     self.lock_controls(False)
                     self.stop_button.configure(state="disabled")
-                    self.start_button.configure(state="normal")
+                    self.total_button.configure(state="normal")
+                    if self.dataset != "all" and self.catalog:
+                        self.show_filters()
+                    try:
+                        can_start = self.dataset == "all" or bool(self.catalog and self.selected())
+                    except ValueError:
+                        can_start = False
+                    self.missing_button.configure(state="normal" if can_start else "disabled")
+                    self.root.after_idle(self.update_page_layout)
                     if kind == "done":
                         prefix = "已停止" if self.stop.is_set() else "下载结束"
-                        self.status.set(f"{prefix}：新增 {value['saved']}，跳过 {value['skipped']}，失败 {value['failed']}")
+                        self.status.set(f"{prefix}：下载 {value['saved']}，已有跳过 {value['skipped']}，"
+                                        f"失败 {value['failed'] + value['category_errors']}")
                     else:
                         self.status.set("下载失败")
                         self.set_log(value, append=True)
