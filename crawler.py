@@ -149,6 +149,9 @@ def parse_pet_catalog(html: str) -> Catalog:
     soup = BeautifulSoup(html, "html.parser")
     pets = []
     for card in soup.select(".npc-card"):
+        # Unreleased entries have no artwork or filter fields.
+        if "is-placeholder" in card.get("class", []):
+            continue
         number_node = card.select_one(".npc-number")
         name_node = card.select_one(".npc-name")
         form_node = card.select_one(".npc-form")
